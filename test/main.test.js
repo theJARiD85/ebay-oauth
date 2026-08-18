@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   connectionRowId,
   createHandler,
+  hashEbayUserId,
   oauthStateRowId,
 } from "../src/main.js";
 
@@ -44,11 +45,14 @@ function configureEnvironment() {
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "keepflip";
   process.env.EBAY_OAUTH_ENVIRONMENT = "sandbox";
-  process.env.EBAY_CLIENT_ID = "client-id";
-  process.env.EBAY_CLIENT_SECRET = "client-secret";
+  process.env.EBAY_SANDBOX_CLIENT_ID = "client-id";
+  process.env.EBAY_SANDBOX_CLIENT_SECRET = "client-secret";
+  process.env.EBAY_PRODUCTION_CLIENT_ID = "production-client-id";
+  process.env.EBAY_PRODUCTION_CLIENT_SECRET = "production-client-secret";
   process.env.EBAY_SANDBOX_RUNAME = "KeepFlip-TheJa-SBX-123";
   process.env.EBAY_PRODUCTION_RUNAME = "KeepFlip-TheJa-PRD-123";
   process.env.EBAY_TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+  process.env.EBAY_USER_ID_HMAC_KEY = Buffer.alloc(32, 11).toString("base64");
   process.env.EBAY_OAUTH_SCOPES = "https://api.ebay.com/oauth/api_scope";
 }
 
@@ -114,7 +118,7 @@ test("creates a private state row and returns an eBay consent URL", async () => 
   assert.equal(JSON.stringify(payload.data).includes(state), false);
 });
 
-test("claims a state, encrypts token data, and returns no eBay secret to the app", async () => {
+test("claims a state, fingerprints the eBay user, encrypts token data, and returns no eBay secret to the app", async () => {
   configureEnvironment();
   const state = randomBytes(32).toString("base64url");
   const stateRowId = oauthStateRowId(state);
@@ -148,6 +152,9 @@ test("claims a state, encrypts token data, and returns no eBay secret to the app
           scope: "https://api.ebay.com/oauth/api_scope",
           token_type: "User Access Token",
         });
+      }
+      if (request.url === "https://api.sandbox.ebay.com/commerce/identity/v1/user/") {
+        return jsonResponse(200, { userId: "immutable-ebay-user-id" });
       }
       if (
         request.url.endsWith(
@@ -191,6 +198,11 @@ test("claims a state, encrypts token data, and returns no eBay secret to the app
   assert.match(payload.data.tokenCiphertext, /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
   assert.equal(payload.data.tokenCiphertext.includes("access-token"), false);
   assert.equal(payload.data.tokenCiphertext.includes("refresh-token"), false);
+  assert.equal(
+    payload.data.ebayUserIdHmac,
+    hashEbayUserId("immutable-ebay-user-id"),
+  );
+  assert.equal(JSON.stringify(payload.data).includes("immutable-ebay-user-id"), false);
   assert.equal(JSON.stringify(result).includes("authorization-code"), false);
   assert.equal(JSON.stringify(result).includes("access-token"), false);
   assert.equal(JSON.stringify(result).includes("refresh-token"), false);

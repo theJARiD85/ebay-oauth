@@ -1,4 +1,9 @@
-import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+} from "node:crypto";
 
 const APPWRITE_DATABASE_ID = "keepflip";
 const OAUTH_STATES_TABLE_ID = "ebay_oauth_states";
@@ -149,6 +154,20 @@ function ebayTokenEndpoint(environment) {
     : "https://api.sandbox.ebay.com/identity/v1/oauth2/token";
 }
 
+function ebayIdentityEndpoint(environment) {
+  return environment === "production"
+    ? "https://api.ebay.com/commerce/identity/v1/user/"
+    : "https://api.sandbox.ebay.com/commerce/identity/v1/user/";
+}
+
+function credentialsFor(environment) {
+  const prefix = environment === "production" ? "EBAY_PRODUCTION" : "EBAY_SANDBOX";
+  return {
+    clientId: requireEnvironment(`${prefix}_CLIENT_ID`),
+    clientSecret: requireEnvironment(`${prefix}_CLIENT_SECRET`),
+  };
+}
+
 function ruNameFor(environment) {
   return requireEnvironment(
     environment === "production"
@@ -227,6 +246,28 @@ function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) 
     cipher.getAuthTag().toString("base64url"),
     ciphertext.toString("base64url"),
   ].join(".");
+}
+
+function hashEbayUserId(userId) {
+  const keyBase64 = requireEnvironment("EBAY_USER_ID_HMAC_KEY");
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(keyBase64)) {
+    throw new RequestError(
+      "EBAY_USER_ID_HMAC_KEY must be a Base64-encoded 32-byte key.",
+      500,
+    );
+  }
+
+  const key = Buffer.from(keyBase64, "base64");
+  if (key.length !== 32) {
+    throw new RequestError(
+      "EBAY_USER_ID_HMAC_KEY must decode to exactly 32 bytes.",
+      500,
+    );
+  }
+
+  return createHmac("sha256", key)
+    .update(`keepflip|ebay-user-id|v1|${userId}`, "utf8")
+    .digest("hex");
 }
 
 function appwriteRuntime(req) {
@@ -459,11 +500,57 @@ async function exchangeAuthorizationCode({
   }
 }
 
+async function fetchEbayUserId({ accessToken, environment, fetchImpl }) {
+  let response;
+  try {
+    response = await fetchImpl(ebayIdentityEndpoint(environment), {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      method: "GET",
+    });
+  } catch {
+    throw new RequestError(
+      "eBay could not verify the connected account. Please try again.",
+      503,
+    );
+  }
+
+  const rawBody = await response.text();
+  if (!response.ok) {
+    throw new RequestError(
+      "eBay could not verify the connected account. Please try again.",
+      502,
+    );
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    throw new RequestError(
+      "eBay returned an unreadable account response. Please try again.",
+      502,
+    );
+  }
+
+  const userId = cleanText(payload?.userId, 500);
+  if (!userId) {
+    throw new RequestError(
+      "eBay could not verify the connected account. Please try again.",
+      502,
+    );
+  }
+
+  return userId;
+}
+
 async function handleConnect({ fetchImpl, now, req, res }) {
   const runtime = appwriteRuntime(req);
   const { ownerId } = await authenticateCaller({ fetchImpl, req, runtime });
   const environment = oauthEnvironment();
-  const clientId = requireEnvironment("EBAY_CLIENT_ID");
+  const { clientId } = credentialsFor(environment);
   const ruName = ruNameFor(environment);
   const scopes = requestedScopes();
   const state = randomBytes(32).toString("base64url");
@@ -615,8 +702,7 @@ async function handleCallback({ fetchImpl, now, req, res }) {
   }
 
   try {
-    const clientId = requireEnvironment("EBAY_CLIENT_ID");
-    const clientSecret = requireEnvironment("EBAY_CLIENT_SECRET");
+    const { clientId, clientSecret } = credentialsFor(environment);
     const ruName = ruNameFor(environment);
     const tokenResponse = await exchangeAuthorizationCode({
       clientId,
@@ -635,6 +721,13 @@ async function handleCallback({ fetchImpl, now, req, res }) {
         502,
       );
     }
+
+    const ebayUserId = await fetchEbayUserId({
+      accessToken,
+      environment,
+      fetchImpl,
+    });
+    const ebayUserIdHmac = hashEbayUserId(ebayUserId);
 
     const ownerId = cleanText(stateRow.ownerId, 36);
     if (!ownerId) {
@@ -670,6 +763,7 @@ async function handleCallback({ fetchImpl, now, req, res }) {
             24 * 60 * 60,
           ),
           createdAt: now.toISOString(),
+          ebayUserIdHmac,
           environment,
           ownerId,
           refreshTokenExpiresAt: dateAfterSeconds(
@@ -787,6 +881,11 @@ export function createHandler({ fetchImpl = fetch, now = () => new Date() } = {}
   };
 }
 
-export { connectionRowId, encryptTokenPayload, oauthStateRowId };
+export {
+  connectionRowId,
+  encryptTokenPayload,
+  hashEbayUserId,
+  oauthStateRowId,
+};
 
 export default createHandler();

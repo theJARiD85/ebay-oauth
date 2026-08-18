@@ -59,15 +59,18 @@ new Function version.
 | Variable | Value |
 | --- | --- |
 | `EBAY_OAUTH_ENVIRONMENT` | `sandbox` while testing, then `production` |
-| `EBAY_CLIENT_ID` | Your matching eBay application Client ID |
-| `EBAY_CLIENT_SECRET` | Your matching eBay application Client Secret |
+| `EBAY_SANDBOX_CLIENT_ID` | Sandbox eBay application Client ID |
+| `EBAY_SANDBOX_CLIENT_SECRET` | Sandbox eBay application Client Secret |
+| `EBAY_PRODUCTION_CLIENT_ID` | Production eBay application Client ID |
+| `EBAY_PRODUCTION_CLIENT_SECRET` | Production eBay application Client Secret |
 | `EBAY_SANDBOX_RUNAME` | Sandbox RuName from eBay |
 | `EBAY_PRODUCTION_RUNAME` | Production RuName from eBay |
 | `EBAY_TOKEN_ENCRYPTION_KEY` | Stable Base64-encoded random 32-byte key |
+| `EBAY_USER_ID_HMAC_KEY` | Stable Base64-encoded random 32-byte key shared with `ebay_account_deletion` |
 | `EBAY_OAUTH_SCOPES` | Start with `https://api.ebay.com/oauth/api_scope` |
 
-Mark the Client Secret and token encryption key as secrets. Keep every one of
-these out of `EXPO_PUBLIC_*` variables and the app bundle.
+Mark the Client Secrets, token encryption key, and HMAC key as secrets. Keep
+every one of these out of `EXPO_PUBLIC_*` variables and the app bundle.
 
 In Windows PowerShell, make the encryption key once and store the result in the
 Function variable:
@@ -80,6 +83,11 @@ $bytes = New-Object byte[] 32
 
 Do not rotate that key casually: it is required later to decrypt already saved
 eBay tokens for refresh or messaging.
+
+Generate `EBAY_USER_ID_HMAC_KEY` with the same PowerShell command, then set the
+same value on this Function and the separate `ebay_account_deletion` Function.
+It is used only to derive a nonreversible matching key for eBay account-
+deletion notices; do not use the token-encryption key for that purpose.
 
 ## Required private TablesDB tables
 
@@ -112,6 +120,7 @@ into the Appwrite row ID, then atomically changes only a `pending` row to
 | --- | --- | --- | --- |
 | `ownerId` | String | yes | 36 |
 | `environment` | Enum | yes | `sandbox`, `production` |
+| `ebayUserIdHmac` | String | yes | 64; nonreversible fingerprint of eBay's immutable user ID |
 | `status` | Enum | yes | `active`, `revoked`, `expired` |
 | `tokenCiphertext` | Long text | yes | AES-256-GCM encrypted JSON only |
 | `accessTokenExpiresAt` | Datetime | yes | |
@@ -121,8 +130,11 @@ into the Appwrite row ID, then atomically changes only a `pending` row to
 | `updatedAt` | Datetime | yes | |
 | `revokedAt` | Datetime | no | |
 
-The Function uses deterministic row IDs, so a user has one connection per eBay
-environment. It does not return `tokenCiphertext` to the app.
+Create a normal key index named `ebay_user_id_hmac_index` on
+`ebayUserIdHmac`. The Function uses deterministic row IDs, so a user has one
+connection per eBay environment. It retrieves eBay's immutable user ID after
+consent but stores only this keyed HMAC, and it does not return
+`tokenCiphertext` or the HMAC to the app.
 
 ## Mobile handoff when you add the Connect eBay button
 
