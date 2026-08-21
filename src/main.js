@@ -14,6 +14,9 @@ const STATUS_PATH = "/status";
 const CALLBACK_PATH = "/oauth/ebay/callback";
 const DECLINED_PATH = "/oauth/ebay/declined";
 const APP_RETURN_URL = "keepflip://ebay/connected";
+const EBAY_BASE_SCOPE = "https://api.ebay.com/oauth/api_scope";
+const EBAY_IDENTITY_SCOPE =
+  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly";
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const MAX_CODE_LENGTH = 1024;
@@ -107,15 +110,12 @@ function requireEnvironment(name) {
 }
 
 function oauthEnvironment(requestedValue) {
-  const value = cleanText(
-    requestedValue || process.env.EBAY_OAUTH_ENVIRONMENT,
-    32,
-  ).toLowerCase();
+  const value = cleanText(requestedValue, 32).toLowerCase();
   if (value === "sandbox" || value === "production") return value;
 
   throw new RequestError(
-    "KeepFlip's eBay connection must set EBAY_OAUTH_ENVIRONMENT to sandbox or production.",
-    500,
+    "KeepFlip must request either the sandbox or production eBay environment.",
+    400,
   );
 }
 
@@ -137,17 +137,15 @@ function requestedScopes() {
   const supplied = cleanText(process.env.EBAY_OAUTH_SCOPES, 4_000);
   const scopes = (supplied
     ? supplied.split(/\s+/)
-    : ["https://api.ebay.com/oauth/api_scope"]
+    : [EBAY_BASE_SCOPE, EBAY_IDENTITY_SCOPE]
   ).filter(Boolean);
-  const unique = [...new Set(scopes)];
+  const unique = [...new Set([EBAY_BASE_SCOPE, EBAY_IDENTITY_SCOPE, ...scopes])];
 
   if (
     unique.length === 0 ||
     unique.some(
       (scope) =>
-        !/^https:\/\/api\.ebay\.com\/oauth\/api_scope(?:\/[A-Za-z0-9._-]+)*$/.test(
-          scope,
-        ),
+        !/^https:\/\/api\.ebay\.com\/oauth\/(?:api_scope(?:\/[A-Za-z0-9._-]+)*|scope\/[A-Za-z0-9._-]+)$/.test(scope),
     )
   ) {
     throw new RequestError(
@@ -233,10 +231,10 @@ function dateAfterSeconds(now, rawSeconds, maximumSeconds) {
   return new Date(now.getTime() + Math.round(seconds * 1_000)).toISOString();
 }
 
-function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) {
+function decodeBase64Key(name, keyBase64) {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(keyBase64)) {
     throw new RequestError(
-      "EBAY_TOKEN_ENCRYPTION_KEY must be a Base64-encoded 32-byte key.",
+      `${name} must be a Base64-encoded 32-byte key.`,
       500,
     );
   }
@@ -244,10 +242,16 @@ function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) 
   const key = Buffer.from(keyBase64, "base64");
   if (key.length !== 32) {
     throw new RequestError(
-      "EBAY_TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes.",
+      `${name} must decode to exactly 32 bytes.`,
       500,
     );
   }
+
+  return key;
+}
+
+function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) {
+  const key = decodeBase64Key("EBAY_TOKEN_ENCRYPTION_KEY", keyBase64);
 
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
@@ -266,21 +270,10 @@ function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) 
 }
 
 function hashEbayUserId(userId) {
-  const keyBase64 = requireEnvironment("EBAY_USER_ID_HMAC_KEY");
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(keyBase64)) {
-    throw new RequestError(
-      "EBAY_USER_ID_HMAC_KEY must be a Base64-encoded 32-byte key.",
-      500,
-    );
-  }
-
-  const key = Buffer.from(keyBase64, "base64");
-  if (key.length !== 32) {
-    throw new RequestError(
-      "EBAY_USER_ID_HMAC_KEY must decode to exactly 32 bytes.",
-      500,
-    );
-  }
+  const key = decodeBase64Key(
+    "EBAY_USER_ID_HMAC_KEY",
+    requireEnvironment("EBAY_USER_ID_HMAC_KEY"),
+  );
 
   return createHmac("sha256", key)
     .update(`keepflip|ebay-user-id|v1|${userId}`, "utf8")
@@ -567,6 +560,14 @@ async function handleConnect({ fetchImpl, now, req, res }) {
   const runtime = appwriteRuntime(req);
   const { ownerId } = await authenticateCaller({ fetchImpl, req, runtime });
   const environment = oauthEnvironment(requestBody(req).environment);
+  decodeBase64Key(
+    "EBAY_TOKEN_ENCRYPTION_KEY",
+    requireEnvironment("EBAY_TOKEN_ENCRYPTION_KEY"),
+  );
+  decodeBase64Key(
+    "EBAY_USER_ID_HMAC_KEY",
+    requireEnvironment("EBAY_USER_ID_HMAC_KEY"),
+  );
   const { clientId } = credentialsFor(environment);
   const ruName = ruNameFor(environment);
   const scopes = requestedScopes();
@@ -607,6 +608,7 @@ async function handleConnect({ fetchImpl, now, req, res }) {
       state,
     }),
     expiresAt,
+    environment,
     ok: true,
   });
 }

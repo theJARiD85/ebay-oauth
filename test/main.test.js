@@ -44,7 +44,7 @@ function responseSink() {
 function configureEnvironment() {
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "keepflip";
-  process.env.EBAY_OAUTH_ENVIRONMENT = "sandbox";
+  delete process.env.EBAY_OAUTH_ENVIRONMENT;
   process.env.EBAY_SANDBOX_CLIENT_ID = "client-id";
   process.env.EBAY_SANDBOX_CLIENT_SECRET = "client-secret";
   process.env.EBAY_PRODUCTION_CLIENT_ID = "production-client-id";
@@ -84,6 +84,7 @@ test("creates a private state row and returns an eBay consent URL", async () => 
 
   await handler({
     req: {
+      bodyJson: { environment: "sandbox" },
       headers: authenticatedHeaders(),
       method: "POST",
       path: "/connect",
@@ -103,6 +104,16 @@ test("creates a private state row and returns an eBay consent URL", async () => 
   assert.equal(
     authorizeUrl.searchParams.get("redirect_uri"),
     "KeepFlip-TheJa-SBX-123",
+  );
+  assert.equal(result.body.environment, "sandbox");
+  assert.equal(
+    authorizeUrl.searchParams
+      .get("scope")
+      ?.split(" ")
+      .includes(
+        "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+      ),
+    true,
   );
 
   const state = authorizeUrl.searchParams.get("state");
@@ -151,6 +162,70 @@ test("uses the environment requested by the signed-in app", async () => {
     authorizeUrl.searchParams.get("redirect_uri"),
     "KeepFlip-TheJa-PRD-123",
   );
+  assert.equal(result.body.environment, "production");
+});
+
+test("requires the signed-in app to choose the eBay environment", async () => {
+  configureEnvironment();
+  const handler = createHandler({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/account")) {
+        return jsonResponse(200, { $id: OWNER_ID, status: true });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    now: () => NOW,
+  });
+  const sink = responseSink();
+
+  await handler({
+    req: {
+      headers: authenticatedHeaders(),
+      method: "POST",
+      path: "/connect",
+    },
+    res: sink.res,
+  });
+
+  assert.equal(sink.response().statusCode, 400);
+  assert.equal(
+    sink.response().body.error,
+    "KeepFlip must request either the sandbox or production eBay environment.",
+  );
+});
+
+test("rejects invalid KeepFlip encryption keys before sending the user to eBay", async () => {
+  configureEnvironment();
+  process.env.EBAY_TOKEN_ENCRYPTION_KEY = Buffer.alloc(36, 7).toString("base64");
+  let stateWasWritten = false;
+  const handler = createHandler({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/account")) {
+        return jsonResponse(200, { $id: OWNER_ID, status: true });
+      }
+      stateWasWritten = true;
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    now: () => NOW,
+  });
+  const sink = responseSink();
+
+  await handler({
+    req: {
+      bodyJson: { environment: "sandbox" },
+      headers: authenticatedHeaders(),
+      method: "POST",
+      path: "/connect",
+    },
+    res: sink.res,
+  });
+
+  assert.equal(sink.response().statusCode, 500);
+  assert.equal(
+    sink.response().body.error,
+    "EBAY_TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes.",
+  );
+  assert.equal(stateWasWritten, false);
 });
 
 test("claims a state, fingerprints the eBay user, encrypts token data, and returns no eBay secret to the app", async () => {
@@ -301,6 +376,7 @@ test("does not expose encrypted token material through authenticated status", as
 
   await handler({
     req: {
+      bodyJson: { environment: "sandbox" },
       headers: authenticatedHeaders(),
       method: "POST",
       path: "/status",

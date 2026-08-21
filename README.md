@@ -58,7 +58,6 @@ new Function version.
 
 | Variable | Value |
 | --- | --- |
-| `EBAY_OAUTH_ENVIRONMENT` | `sandbox` while testing, then `production` |
 | `EBAY_SANDBOX_CLIENT_ID` | Sandbox eBay application Client ID |
 | `EBAY_SANDBOX_CLIENT_SECRET` | Sandbox eBay application Client Secret |
 | `EBAY_PRODUCTION_CLIENT_ID` | Production eBay application Client ID |
@@ -67,10 +66,24 @@ new Function version.
 | `EBAY_PRODUCTION_RUNAME` | Production RuName from eBay |
 | `EBAY_TOKEN_ENCRYPTION_KEY` | Stable Base64-encoded random 32-byte key |
 | `EBAY_USER_ID_HMAC_KEY` | Stable Base64-encoded random 32-byte key shared with `ebay_account_deletion` |
-| `EBAY_OAUTH_SCOPES` | Start with `https://api.ebay.com/oauth/api_scope` |
+| `EBAY_OAUTH_SCOPES` | Optional additional scopes; KeepFlip always requests the base and Commerce Identity read-only scopes |
 
 Mark the Client Secrets, token encryption key, and HMAC key as secrets. Keep
 every one of these out of `EXPO_PUBLIC_*` variables and the app bundle.
+
+The signed-in app must send `environment: "sandbox"` or
+`environment: "production"` with every `/connect` and `/status` request. The
+Function stores that choice with the one-time OAuth state and uses the stored
+value during the callback. There is deliberately no Function-wide environment
+fallback, so sandbox and production attempts cannot be mixed accidentally.
+
+KeepFlip always requests these two scopes because the callback immediately
+uses Commerce Identity to bind the token to the correct eBay user:
+
+```text
+https://api.ebay.com/oauth/api_scope
+https://api.ebay.com/oauth/api_scope/commerce.identity.readonly
+```
 
 In Windows PowerShell, make the encryption key once and store the result in the
 Function variable:
@@ -83,6 +96,10 @@ $bytes = New-Object byte[] 32
 
 Do not rotate that key casually: it is required later to decrypt already saved
 eBay tokens for refresh or messaging.
+
+This random encryption key is not eBay's Base64 `client_id:client_secret`
+credential. The Function creates that separate HTTP Basic credential itself
+when it exchanges the authorization code.
 
 Generate `EBAY_USER_ID_HMAC_KEY` with the same PowerShell command, then set the
 same value on this Function and the separate `ebay_account_deletion` Function.
