@@ -1,10 +1,9 @@
-import {
-  createCipheriv,
-  createHash,
-  createHmac,
-  randomBytes,
-} from "node:crypto";
+import { Client, Databases, Users, Account } from "node-appwrite";
+import { createHash, randomBytes, createCipheriv, createHmac } from "crypto";
 
+// =========================================================================
+// 1. CONSTANTS
+// =========================================================================
 const APPWRITE_DATABASE_ID = "keepflip";
 const OAUTH_STATES_TABLE_ID = "ebay_oauth_states";
 const CONNECTIONS_TABLE_ID = "ebay_connections";
@@ -18,6 +17,9 @@ const STATE_TTL_MS = 10 * 60 * 1000;
 const MAX_CODE_LENGTH = 1024;
 const MAX_STATE_LENGTH = 160;
 
+// =========================================================================
+// 2. ERROR HANDLERS & HELPERS
+// =========================================================================
 export class RequestError extends Error {
   constructor(message, statusCode = 500) {
     super(message);
@@ -33,13 +35,11 @@ function cleanText(value, maximumLength = 2_000) {
 
 function getHeader(headers, name) {
   if (!headers || typeof headers !== "object") return "";
-
   const expected = name.toLowerCase();
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() !== expected) continue;
     return cleanText(Array.isArray(value) ? value[0] : value, 8_000);
   }
-
   return "";
 }
 
@@ -52,7 +52,6 @@ function getRequestPath(req) {
       return "/";
     }
   }
-
   const requestUrl = cleanText(req?.url, 8_000);
   if (requestUrl) {
     try {
@@ -61,7 +60,6 @@ function getRequestPath(req) {
       return "/";
     }
   }
-
   return "/";
 }
 
@@ -73,45 +71,24 @@ function queryValue(req, key) {
     const cleaned = cleanText(first, 8_000);
     if (cleaned) return cleaned;
   }
-
   if (typeof parsedQuery === "string") {
-    const value = cleanText(
-      new URLSearchParams(parsedQuery).get(key),
-      8_000,
-    );
+    const value = cleanText(new URLSearchParams(parsedQuery).get(key), 8_000);
     if (value) return value;
   }
-
   const queryString = cleanText(req?.queryString, 8_000);
   if (queryString) {
     return cleanText(new URLSearchParams(queryString).get(key), 8_000);
   }
-
   const requestUrl = cleanText(req?.url, 8_000);
   if (requestUrl) {
     try {
       const value = cleanText(
         new URL(requestUrl, "https://keepflip.invalid").searchParams.get(key),
-        8_000,
+        8_000
       );
       if (value) return value;
-    } catch {
-      // Try the explicit request path below.
-    }
+    } catch {}
   }
-
-  const requestPath = cleanText(req?.path, 8_000);
-  if (requestPath) {
-    try {
-      return cleanText(
-        new URL(requestPath, "https://keepflip.invalid").searchParams.get(key),
-        8_000,
-      );
-    } catch {
-      return "";
-    }
-  }
-
   return "";
 }
 
@@ -120,7 +97,7 @@ function requireEnvironment(name) {
   if (!value) {
     throw new RequestError(
       `KeepFlip's eBay connection is missing the ${name} Function variable.`,
-      500,
+      500
     );
   }
   return value;
@@ -129,10 +106,9 @@ function requireEnvironment(name) {
 function oauthEnvironment(requestedValue) {
   const value = cleanText(requestedValue, 32).toLowerCase();
   if (value === "sandbox" || value === "production") return value;
-
   throw new RequestError(
     "KeepFlip must request either the sandbox or production eBay environment.",
-    400,
+    400
   );
 }
 
@@ -157,28 +133,24 @@ function requestedScopeText(value) {
     scopes.length === 0 ||
     scopes.some(
       (scope) =>
-        !/^https:\/\/api\.ebay\.com\/oauth\/(?:api_scope(?:\/[A-Za-z0-9._-]+)*|scope\/[A-Za-z0-9._-]+)$/.test(scope),
+        !/^https:\/\/api\.ebay\.com\/oauth\/(?:api_scope(?:\/[A-Za-z0-9._-]+)*|scope\/[A-Za-z0-9._-]+)$/.test(scope)
     )
   ) {
-    throw new RequestError(
-      "KeepFlip supplied an invalid eBay OAuth scope list.",
-      400,
-    );
+    throw new RequestError("KeepFlip supplied an invalid eBay OAuth scope list.", 400);
   }
-
   return [...new Set(scopes)].join(" ");
 }
 
 function ebayTokenEndpoint(environment) {
   return environment === "production"
-    ? "https://api.ebay.com/identity/v1/oauth2/token"
-    : "https://api.sandbox.ebay.com/identity/v1/oauth2/token";
+    ? "https://ebay.com"
+    : "https://ebay.com";
 }
 
 function ebayIdentityEndpoint(environment) {
   return environment === "production"
-    ? "https://api.ebay.com/commerce/identity/v1/user/"
-    : "https://api.sandbox.ebay.com/commerce/identity/v1/user/";
+    ? "https://ebay.com"
+    : "https://ebay.com";
 }
 
 function credentialsFor(environment) {
@@ -191,9 +163,7 @@ function credentialsFor(environment) {
 
 function ruNameFor(environment) {
   return requireEnvironment(
-    environment === "production"
-      ? "EBAY_PRODUCTION_RUNAME"
-      : "EBAY_SANDBOX_RUNAME",
+    environment === "production" ? "EBAY_PRODUCTION_RUNAME" : "EBAY_SANDBOX_RUNAME"
   );
 }
 
@@ -210,55 +180,34 @@ function connectionRowId(ownerId, environment) {
 }
 
 function isOpaqueState(value) {
-  return (
-    value.length >= 32 &&
-    value.length <= MAX_STATE_LENGTH &&
-    /^[A-Za-z0-9_-]+$/.test(value)
-  );
+  return value.length >= 32 && value.length <= MAX_STATE_LENGTH && /^[A-Za-z0-9_-]+$/.test(value);
 }
 
 function isValidAuthorizationCode(value) {
   return value.length > 0 && value.length <= MAX_CODE_LENGTH;
 }
 
-function isFutureIsoDate(value, now) {
-  const parsed = Date.parse(cleanText(value, 80));
-  return Number.isFinite(parsed) && parsed > now.getTime();
-}
-
 function dateAfterSeconds(now, rawSeconds, maximumSeconds) {
   const seconds = Number(rawSeconds);
   if (!Number.isFinite(seconds) || seconds < 60 || seconds > maximumSeconds) {
-    throw new RequestError(
-      "eBay returned an invalid token expiration. Please connect again.",
-      502,
-    );
+    throw new RequestError("eBay returned an invalid token expiration. Please connect again.", 502);
   }
   return new Date(now.getTime() + Math.round(seconds * 1_000)).toISOString();
 }
 
 function decodeBase64Key(name, keyBase64) {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(keyBase64)) {
-    throw new RequestError(
-      `${name} must be a Base64-encoded 32-byte key.`,
-      500,
-    );
+    throw new RequestError(`${name} must be a Base64-encoded 32-byte key.`, 500);
   }
-
   const key = Buffer.from(keyBase64, "base64");
   if (key.length !== 32) {
-    throw new RequestError(
-      `${name} must decode to exactly 32 bytes.`,
-      500,
-    );
+    throw new RequestError(`${name} must decode to exactly 32 bytes.`, 500);
   }
-
   return key;
 }
 
 function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) {
   const key = decodeBase64Key("EBAY_TOKEN_ENCRYPTION_KEY", keyBase64);
-
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   cipher.setAAD(Buffer.from(`${ownerId}|ebay|${environment}|v1`, "utf8"));
@@ -266,7 +215,6 @@ function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) 
     cipher.update(JSON.stringify(tokenPayload), "utf8"),
     cipher.final(),
   ]);
-
   return [
     "v1",
     iv.toString("base64url"),
@@ -276,630 +224,219 @@ function encryptTokenPayload({ keyBase64, ownerId, environment, tokenPayload }) 
 }
 
 function hashEbayUserId(userId) {
-  const key = decodeBase64Key(
-    "EBAY_USER_ID_HMAC_KEY",
-    requireEnvironment("EBAY_USER_ID_HMAC_KEY"),
-  );
-
-  return createHmac("sha256", key)
-    .update(`keepflip|ebay-user-id|v1|${userId}`, "utf8")
-    .digest("hex");
+  const key = decodeBase64Key("EBAY_USER_ID_HMAC_KEY", requireEnvironment("EBAY_USER_ID_HMAC_KEY"));
+  return createHmac("sha256", key).update(`keepflip|ebay-user-id|v1|${userId}`, "utf8").digest("hex");
 }
 
 function appwriteRuntime(req) {
-  const endpoint = requireEnvironment("APPWRITE_FUNCTION_API_ENDPOINT").replace(
-    /\/+$/,
-    "",
-  );
+  const endpoint = requireEnvironment("APPWRITE_FUNCTION_API_ENDPOINT").replace(/\/+$/, "");
   const projectId = requireEnvironment("APPWRITE_FUNCTION_PROJECT_ID");
   const apiKey = getHeader(req?.headers, "x-appwrite-key");
-
   if (!apiKey) {
-    throw new RequestError(
-      "KeepFlip could not access its secure eBay connection storage.",
-      500,
-    );
+    throw new RequestError("KeepFlip could not access its secure eBay connection storage.", 500);
   }
-
   return { apiKey, endpoint, projectId };
 }
 
-async function appwriteRequest({
-  apiKey,
-  body,
-  endpoint,
-  fetchImpl,
-  method = "GET",
-  path,
-  projectId,
-  userJwt,
-}) {
-  let response;
-  try {
-    response = await fetchImpl(`${endpoint}${path}`, {
-      method,
-      headers: {
-        "X-Appwrite-Project": projectId,
-        ...(apiKey ? { "X-Appwrite-Key": apiKey } : {}),
-        ...(userJwt ? { "X-Appwrite-JWT": userJwt } : {}),
-        ...(body ? { "Content-Type": "application/json" } : {}),
-        Accept: "application/json",
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-  } catch {
-    throw new RequestError(
-      "KeepFlip could not reach its secure eBay connection storage.",
-      503,
-    );
-  }
-
-  const rawBody = await response.text();
-  let payload = {};
-  if (rawBody) {
-    try {
-      payload = JSON.parse(rawBody);
-    } catch {
-      throw new RequestError(
-        "KeepFlip's secure eBay connection storage returned an unreadable response.",
-        503,
-      );
-    }
-  }
-
-  return { ok: response.ok, payload, status: response.status };
-}
-
-async function requireAppwriteSuccess(request) {
-  const result = await appwriteRequest(request);
-  if (!result.ok) {
-    throw new RequestError(
-      "KeepFlip could not update the secure eBay connection.",
-      result.status === 401 || result.status === 403 ? 403 : 503,
-    );
-  }
-  return result.payload;
-}
-
-async function authenticateCaller({ fetchImpl, req, runtime }) {
-  const callerUserId = getHeader(req?.headers, "x-appwrite-user-id");
-  const userJwt = getHeader(req?.headers, "x-appwrite-user-jwt");
-
-  if (!callerUserId || !userJwt) {
-    throw new RequestError("Sign in to KeepFlip before connecting eBay.", 401);
-  }
-
-  const account = await appwriteRequest({
-    endpoint: runtime.endpoint,
-    fetchImpl,
-    path: "/account",
-    projectId: runtime.projectId,
-    userJwt,
-  });
-
-  if (!account.ok) {
-    throw new RequestError(
-      "Sign in to KeepFlip before connecting eBay.",
-      account.status === 401 ? 401 : 503,
-    );
-  }
-
-  const user = account.payload;
-  if (user?.$id !== callerUserId || user?.status !== true) {
-    throw new RequestError("A registered KeepFlip account is required.", 403);
-  }
-
-  return { ownerId: callerUserId };
-}
-
-function appReturnUrl(status) {
-  const url = new URL(APP_RETURN_URL);
-  url.searchParams.set("status", status);
-  return url.toString();
-}
-
-function browserPage(res, { message, statusCode, title }) {
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title></head><body><main><h1>${title}</h1><p>${message}</p><p>You can return to KeepFlip and try again if needed.</p></main></body></html>`;
-  return res.text(html, statusCode, {
-    "cache-control": "no-store",
-    "content-type": "text/html; charset=utf-8",
-  });
-}
-
-function jsonError(res, caughtError) {
-  const message =
-    caughtError instanceof Error
-      ? caughtError.message
-      : "KeepFlip could not complete the eBay connection.";
-  const statusCode =
-    caughtError instanceof RequestError ? caughtError.statusCode : 500;
-  return res.json({ ok: false, error: message }, statusCode);
-}
-
-async function updateState({ data, fetchImpl, runtime, stateRowId }) {
-  return requireAppwriteSuccess({
-    apiKey: runtime.apiKey,
-    body: { data },
-    endpoint: runtime.endpoint,
-    fetchImpl,
-    method: "PATCH",
-    path: `/tablesdb/${encodeURIComponent(
-      APPWRITE_DATABASE_ID,
-    )}/tables/${encodeURIComponent(OAUTH_STATES_TABLE_ID)}/rows/${encodeURIComponent(
-      stateRowId,
-    )}`,
-    projectId: runtime.projectId,
-  });
-}
-
-async function claimState({ fetchImpl, now, runtime, stateRowId }) {
-  const queryFor = (column, value) =>
-    JSON.stringify({ method: "equal", column, values: [value] });
-  const payload = await requireAppwriteSuccess({
-    apiKey: runtime.apiKey,
-    body: {
-      data: { claimedAt: now.toISOString(), status: "processing" },
-      queries: [
-        queryFor("$id", stateRowId),
-        queryFor("status", "pending"),
-      ],
-    },
-    endpoint: runtime.endpoint,
-    fetchImpl,
-    method: "PATCH",
-    path: `/tablesdb/${encodeURIComponent(
-      APPWRITE_DATABASE_ID,
-    )}/tables/${encodeURIComponent(OAUTH_STATES_TABLE_ID)}/rows`,
-    projectId: runtime.projectId,
-  });
-
-  return Number(payload?.total) === 1;
-}
-
-async function exchangeAuthorizationCode({
-  clientId,
-  clientSecret,
-  code,
-  environment,
-  fetchImpl,
-  ruName,
-}) {
-  let response;
-  try {
-    response = await fetchImpl(ebayTokenEndpoint(environment), {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${Buffer.from(
-          `${clientId}:${clientSecret}`,
-        ).toString("base64")}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
-      },
-      body: new URLSearchParams({
-        code,
-        grant_type: "authorization_code",
-        redirect_uri: ruName,
-      }).toString(),
-    });
-  } catch {
-    throw new RequestError(
-      "eBay could not complete the connection. Please try again.",
-      503,
-    );
-  }
-
-  const rawBody = await response.text();
-  if (!response.ok) {
-    throw new RequestError(
-      "eBay could not complete the connection. Please try again.",
-      502,
-    );
-  }
+// =========================================================================
+// 3. MAIN ROUTING CONTROLLER
+// =========================================================================
+export default async function (context) {
+  const req = context.req;
+  const res = context.res;
 
   try {
-    return JSON.parse(rawBody);
-  } catch {
-    throw new RequestError(
-      "eBay returned an unreadable connection response. Please try again.",
-      502,
-    );
-  }
-}
+    const targetPath = getRequestPath(req);
+    const { apiKey, endpoint, projectId } = appwriteRuntime(req);
+    
+    const systemClient = new Client()
+      .setEndpoint(endpoint)
+      .setProject(projectId)
+      .setKey(apiKey);
 
-async function fetchEbayUserId({ accessToken, environment, fetchImpl }) {
-  let response;
-  try {
-    response = await fetchImpl(ebayIdentityEndpoint(environment), {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      method: "GET",
-    });
-  } catch {
-    throw new RequestError(
-      "eBay could not verify the connected account. Please try again.",
-      503,
-    );
-  }
+    const databases = new Databases(systemClient);
+    const users = new Users(systemClient);
 
-  const rawBody = await response.text();
-  if (!response.ok) {
-    throw new RequestError(
-      "eBay could not verify the connected account. Please try again.",
-      502,
-    );
-  }
+    // ---------------------------------------------------------------------
+    // PATHWAY A: /connect (Called by App to kick off tracking)
+    // ---------------------------------------------------------------------
+    if (targetPath === CONNECT_PATH) {
+      const body = requestBody(req);
+      const environment = oauthEnvironment(body.environment);
+      const scopeText = requestedScopeText(body.scopeText);
+      
+      const userJwt = cleanText(body.jwt, 2048);
+      if (!userJwt) throw new RequestError("Unauthorized client execution framework.", 401);
 
-  let payload;
-  try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    throw new RequestError(
-      "eBay returned an unreadable account response. Please try again.",
-      502,
-    );
-  }
+      const userClient = new Client().setEndpoint(endpoint).setProject(projectId).setJWT(userJwt);
+      const accountService = new Account(userClient);
+      const activeUser = await accountService.get();
+      const ownerId = activeUser.$id;
 
-  const userId = cleanText(payload?.userId, 500);
-  if (!userId) {
-    throw new RequestError(
-      "eBay could not verify the connected account. Please try again.",
-      502,
-    );
-  }
+      const state = randomBytes(48).toString("base64url");
+      const stateDocumentId = oauthStateRowId(state);
 
-  return userId;
-}
-
-async function handleConnect({ fetchImpl, now, req, res }) {
-  const runtime = appwriteRuntime(req);
-  const { ownerId } = await authenticateCaller({ fetchImpl, req, runtime });
-  const body = requestBody(req);
-  const environment = oauthEnvironment(body.environment);
-  const scopeText = requestedScopeText(body.scopeText);
-  decodeBase64Key(
-    "EBAY_TOKEN_ENCRYPTION_KEY",
-    requireEnvironment("EBAY_TOKEN_ENCRYPTION_KEY"),
-  );
-  decodeBase64Key(
-    "EBAY_USER_ID_HMAC_KEY",
-    requireEnvironment("EBAY_USER_ID_HMAC_KEY"),
-  );
-  const state = randomBytes(32).toString("base64url");
-  const stateRowId = oauthStateRowId(state);
-  const createdAt = now.toISOString();
-  const expiresAt = new Date(now.getTime() + STATE_TTL_MS).toISOString();
-
-  await requireAppwriteSuccess({
-    apiKey: runtime.apiKey,
-    body: {
-      data: {
-        createdAt,
-        environment,
-        expiresAt,
-        ownerId,
-        scopeText,
-        status: "pending",
-      },
-      permissions: [],
-      rowId: stateRowId,
-    },
-    endpoint: runtime.endpoint,
-    fetchImpl,
-    method: "POST",
-    path: `/tablesdb/${encodeURIComponent(
-      APPWRITE_DATABASE_ID,
-    )}/tables/${encodeURIComponent(OAUTH_STATES_TABLE_ID)}/rows`,
-    projectId: runtime.projectId,
-  });
-
-  return res.json({
-    expiresAt,
-    environment,
-    ok: true,
-    state,
-  });
-}
-
-async function handleStatus({ fetchImpl, req, res }) {
-  const runtime = appwriteRuntime(req);
-  const { ownerId } = await authenticateCaller({ fetchImpl, req, runtime });
-  const environment = oauthEnvironment(requestBody(req).environment);
-  const rowId = connectionRowId(ownerId, environment);
-  const result = await appwriteRequest({
-    apiKey: runtime.apiKey,
-    endpoint: runtime.endpoint,
-    fetchImpl,
-    path: `/tablesdb/${encodeURIComponent(
-      APPWRITE_DATABASE_ID,
-    )}/tables/${encodeURIComponent(CONNECTIONS_TABLE_ID)}/rows/${encodeURIComponent(
-      rowId,
-    )}`,
-    projectId: runtime.projectId,
-  });
-
-  if (result.status === 404) {
-    return res.json({
-      connected: false,
-      marketplace: "ebay",
-      ok: true,
-      status: "not_connected",
-    });
-  }
-
-  if (!result.ok || result.payload?.ownerId !== ownerId) {
-    throw new RequestError(
-      "KeepFlip could not read the eBay connection status.",
-      503,
-    );
-  }
-
-  return res.json({
-    connected: result.payload?.status === "active",
-    marketplace: "ebay",
-    ok: true,
-    status: result.payload?.status === "active" ? "connected" : "not_connected",
-  });
-}
-
-async function handleCallback({ fetchImpl, now, req, res }) {
-  const runtime = appwriteRuntime(req);
-  const state = queryValue(req, "state");
-
-  if (!isOpaqueState(state)) {
-    return browserPage(res, {
-      message: "This eBay connection link is invalid or has already expired.",
-      statusCode: 400,
-      title: "eBay connection unavailable",
-    });
-  }
-
-  const stateRowId = oauthStateRowId(state);
-  const stateResult = await appwriteRequest({
-    apiKey: runtime.apiKey,
-    endpoint: runtime.endpoint,
-    fetchImpl,
-    path: `/tablesdb/${encodeURIComponent(
-      APPWRITE_DATABASE_ID,
-    )}/tables/${encodeURIComponent(OAUTH_STATES_TABLE_ID)}/rows/${encodeURIComponent(
-      stateRowId,
-    )}`,
-    projectId: runtime.projectId,
-  });
-
-  const stateRow = stateResult.ok ? stateResult.payload : null;
-  const environment =
-    stateRow?.environment === "production" || stateRow?.environment === "sandbox"
-      ? stateRow.environment
-      : null;
-  if (
-    !stateRow ||
-    !environment ||
-    stateRow.status !== "pending" ||
-    !isFutureIsoDate(stateRow.expiresAt, now)
-  ) {
-    return browserPage(res, {
-      message: "This eBay connection link is invalid, expired, or already used.",
-      statusCode: 400,
-      title: "eBay connection unavailable",
-    });
-  }
-
-  const claimed = await claimState({ fetchImpl, now, runtime, stateRowId });
-  if (!claimed) {
-    return browserPage(res, {
-      message: "This eBay connection link has already been used. Return to KeepFlip to check its status.",
-      statusCode: 409,
-      title: "eBay connection already handled",
-    });
-  }
-
-  const code = queryValue(req, "code");
-  const declined =
-    getRequestPath(req) === DECLINED_PATH || Boolean(queryValue(req, "error"));
-  if (declined || !isValidAuthorizationCode(code)) {
-    await updateState({
-      data: {
-        completedAt: now.toISOString(),
-        failureCode: "declined",
-        status: "declined",
-      },
-      fetchImpl,
-      runtime,
-      stateRowId,
-    });
-    return res.redirect(appReturnUrl("cancelled"), 302);
-  }
-
-  try {
-    const { clientId, clientSecret } = credentialsFor(environment);
-    const ruName = ruNameFor(environment);
-    const tokenResponse = await exchangeAuthorizationCode({
-      clientId,
-      clientSecret,
-      code,
-      environment,
-      fetchImpl,
-      ruName,
-    });
-    const accessToken = cleanText(tokenResponse?.access_token, 8_000);
-    const refreshToken = cleanText(tokenResponse?.refresh_token, 8_000);
-
-    if (!accessToken || !refreshToken) {
-      throw new RequestError(
-        "eBay did not provide a usable connection token. Please try again.",
-        502,
-      );
-    }
-
-    const ebayUserId = await fetchEbayUserId({
-      accessToken,
-      environment,
-      fetchImpl,
-    });
-    const ebayUserIdHmac = hashEbayUserId(ebayUserId);
-
-    const ownerId = cleanText(stateRow.ownerId, 36);
-    if (!ownerId) {
-      throw new RequestError(
-        "KeepFlip could not verify the account that started this eBay connection.",
-        503,
-      );
-    }
-
-    const grantedScopes =
-      cleanText(tokenResponse?.scope, 4_000) ||
-      cleanText(stateRow.scopeText, 4_000);
-    const tokenCiphertext = encryptTokenPayload({
-      environment,
-      keyBase64: requireEnvironment("EBAY_TOKEN_ENCRYPTION_KEY"),
-      ownerId,
-      tokenPayload: {
-        accessToken,
-        issuedAt: now.toISOString(),
-        refreshToken,
-        scopeText: grantedScopes,
-        tokenType: cleanText(tokenResponse?.token_type, 80) || "Bearer",
-      },
-    });
-
-    await requireAppwriteSuccess({
-      apiKey: runtime.apiKey,
-      body: {
-        data: {
-          accessTokenExpiresAt: dateAfterSeconds(
-            now,
-            tokenResponse?.expires_in,
-            24 * 60 * 60,
-          ),
-          createdAt: now.toISOString(),
-          ebayUserIdHmac,
-          environment,
-          ownerId,
-          refreshTokenExpiresAt: dateAfterSeconds(
-            now,
-            tokenResponse?.refresh_token_expires_in,
-            2 * 365 * 24 * 60 * 60,
-          ),
-          revokedAt: null,
-          scopeText: grantedScopes,
-          status: "active",
-          tokenCiphertext,
-          updatedAt: now.toISOString(),
-        },
-        permissions: [],
-      },
-      endpoint: runtime.endpoint,
-      fetchImpl,
-      method: "PUT",
-      path: `/tablesdb/${encodeURIComponent(
+      await databases.createDocument(
         APPWRITE_DATABASE_ID,
-      )}/tables/${encodeURIComponent(CONNECTIONS_TABLE_ID)}/rows/${encodeURIComponent(
-        connectionRowId(ownerId, environment),
-      )}`,
-      projectId: runtime.projectId,
-    });
+        OAUTH_STATES_TABLE_ID,
+        stateDocumentId,
+        {
+          ownerId,
+          environment,
+          scopeText,
+          createdAt: new Date().toISOString(),
+        }
+      );
 
-    await updateState({
-      data: {
-        completedAt: now.toISOString(),
-        failureCode: null,
-        status: "completed",
-      },
-      fetchImpl,
-      runtime,
-      stateRowId,
-    });
-  } catch (caughtError) {
-    try {
-      await updateState({
-        data: {
-          completedAt: now.toISOString(),
-          failureCode: "connection_failed",
-          status: "failed",
+      return res.json({ state, environment });
+    }
+
+    // ---------------------------------------------------------------------
+    // PATHWAY B: /status (Called by App to check mapping status)
+    // ---------------------------------------------------------------------
+    if (targetPath === STATUS_PATH) {
+      const body = requestBody(req);
+      const environment = oauthEnvironment(body.environment);
+      const userJwt = cleanText(body.jwt, 2048);
+      if (!userJwt) throw new RequestError("Missing security credentials context.", 401);
+  
+      const userClient = new Client().setEndpoint(endpoint).setProject(projectId).setJWT(userJwt);
+      const accountService = new Account(userClient);
+      const activeUser = await accountService.get();
+  
+      const connectionDocId = connectionRowId(activeUser.$id, environment);
+  
+      try {
+        await databases.getDocument(APPWRITE_DATABASE_ID, CONNECTIONS_TABLE_ID, connectionDocId);
+        return res.json({ connected: true });
+      } catch (dbError) {
+        if (dbError.code === 404) {
+          return res.json({ connected: false });
+        }
+        throw dbError;
+      }
+    }
+  
+    // ---------------------------------------------------------------------
+    // PATHWAY C: /oauth/ebay/callback (Redirected from eBay)
+    // ---------------------------------------------------------------------
+    if (targetPath === CALLBACK_PATH) {
+      const code = queryValue(req, "code");
+      const state = queryValue(req, "state");
+  
+      if (!isValidAuthorizationCode(code) || !isOpaqueState(state)) {
+        throw new RequestError("Malformed callback signatures returned from eBay.", 400);
+      }
+  
+      const stateDocumentId = oauthStateRowId(state);
+      let stateRecord;
+      try {
+        stateRecord = await databases.getDocument(APPWRITE_DATABASE_ID, OAUTH_STATES_TABLE_ID, stateDocumentId);
+        await databases.deleteDocument(APPWRITE_DATABASE_ID, OAUTH_STATES_TABLE_ID, stateDocumentId);
+      } catch {
+        throw new RequestError("Expired or invalid session authorization state sequence.", 403);
+      }
+  
+      const recordAge = Date.now() - Date.parse(stateRecord.createdAt);
+      if (recordAge > STATE_TTL_MS) {
+        throw new RequestError("The authentication request session has expired.", 403);
+      }
+  
+      const activeEnv = stateRecord.environment;
+      const ownerId = stateRecord.ownerId;
+      const { clientId, clientSecret } = credentialsFor(activeEnv);
+      const ruName = ruNameFor(activeEnv);
+  
+      const basicAuthHeader = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+      const tokenEndpoint = ebayTokenEndpoint(activeEnv);
+  
+      const tokenResponse = await fetch(tokenEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Authorization": `Basic ${basicAuthHeader}`,
         },
-        fetchImpl,
-        runtime,
-        stateRowId,
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: code,
+          redirect_uri: ruName,
+        }),
       });
-    } catch {
-      // Preserve the original safe error. The state has already been claimed.
+  
+      const tokenPayload = await tokenResponse.json();
+      if (!tokenResponse.ok) {
+        throw new RequestError(`eBay authorization exchange rejected: ${tokenPayload.error_description || 'Unknown Error'}`, 502);
+      }
+  
+      const identityEndpoint = ebayIdentityEndpoint(activeEnv);
+      const identityResponse = await fetch(identityEndpoint, {
+        headers: { "Authorization": `Bearer ${tokenPayload.access_token}` },
+      });
+  
+      const identityPayload = await identityResponse.json();
+      if (!identityResponse.ok) {
+        throw new RequestError("Could not retrieve clean identity metrics from the eBay portal.", 502);
+      }
+  
+      const rawEbayUserId = identityPayload.userId;
+      const hashedEbayId = hashEbayUserId(rawEbayUserId);
+  
+      const encryptionKey = requireEnvironment("EBAY_TOKEN_ENCRYPTION_KEY");
+      const secureTokenBlob = encryptTokenPayload({
+        keyBase64: encryptionKey,
+        ownerId,
+        environment: activeEnv,
+        tokenPayload: {
+          access_token: tokenPayload.access_token,
+          refresh_token: tokenPayload.refresh_token,
+          expires_at: dateAfterSeconds(new Date(), tokenPayload.expires_in, 7200),
+          refresh_token_expires_at: dateAfterSeconds(new Date(), tokenPayload.refresh_token_expires_in, 60 * 60 * 24 * 500),
+        },
+      });
+  
+      const connectionDocId = connectionRowId(ownerId, activeEnv);
+      const connectionData = {
+        ownerId,
+        hashedEbayId,
+        encryptedTokens: secureTokenBlob,
+        ebayUsername: cleanText(identityPayload.username || identityPayload.displayName, 200),
+        updatedAt: new Date().toISOString(),
+      };
+  
+      try {
+        await databases.updateDocument(APPWRITE_DATABASE_ID, CONNECTIONS_TABLE_ID, connectionDocId, connectionData);
+      } catch (updateError) {
+        if (updateError.code === 404) {
+          await databases.createDocument(APPWRITE_DATABASE_ID, CONNECTIONS_TABLE_ID, connectionDocId, connectionData);
+        } else {
+          throw updateError;
+        }
+      }
+  
+      const tokenObj = await users.createToken(ownerId);
+      const finalRedirectUrl = `${APP_RETURN_URL}?userId=${ownerId}&secret=${tokenObj.secret}&state=${state}`;
+      return res.redirect(finalRedirectUrl);
     }
-
-    throw caughtError;
+  
+    // ---------------------------------------------------------------------
+    // PATHWAY D: /oauth/ebay/declined (User cancelled)
+    // ---------------------------------------------------------------------
+    if (targetPath === DECLINED_PATH) {
+      return res.redirect("keepflip://ebay/declined");
+    }
+  
+    throw new RequestError("Resource endpoint not found.", 404);
+  
+  } catch (error) {
+    const statusCode = error instanceof RequestError ? error.statusCode : 500;
+    context.error(`[KeepFlip OAuth Error]: ${error.message}`);
+    
+    return res.json(
+      {
+        success: false,
+        message: error.message || "An unexpected infrastructure error occurred.",
+      },
+      statusCode
+    );
   }
-
-  return res.redirect(appReturnUrl("connected"), 302);
 }
-
-export function createHandler({ fetchImpl = fetch, now = () => new Date() } = {}) {
-  return async ({ req, res, log = () => {}, error = () => {} }) => {
-    const method = cleanText(req?.method, 16).toUpperCase();
-    const path = getRequestPath(req);
-
-    try {
-      if (path === CONNECT_PATH) {
-        if (method !== "POST") {
-          throw new RequestError("Use POST to start an eBay connection.", 405);
-        }
-        return await handleConnect({ fetchImpl, now: now(), req, res });
-      }
-
-      if (path === STATUS_PATH) {
-        if (method !== "POST") {
-          throw new RequestError("Use POST to check the eBay connection.", 405);
-        }
-        return await handleStatus({ fetchImpl, req, res });
-      }
-
-      if (path === CALLBACK_PATH || path === DECLINED_PATH) {
-        if (method !== "GET") {
-          return browserPage(res, {
-            message: "This eBay connection endpoint only accepts the redirect from eBay.",
-            statusCode: 405,
-            title: "Method not allowed",
-          });
-        }
-        return await handleCallback({ fetchImpl, now: now(), req, res });
-      }
-
-      return browserPage(res, {
-        message: "This endpoint is used only to connect an eBay account to KeepFlip.",
-        statusCode: 404,
-        title: "KeepFlip eBay connection",
-      });
-    } catch (caughtError) {
-      const message =
-        caughtError instanceof Error
-          ? caughtError.message
-          : "KeepFlip could not complete the eBay connection.";
-      // Do not log request URLs, OAuth codes, states, tokens, or provider bodies.
-      error(`[eBay OAuth] ${message}`);
-      log("eBay OAuth request ended without exposing credentials.");
-
-      if (path === CALLBACK_PATH || path === DECLINED_PATH) {
-        return browserPage(res, {
-          message:
-            caughtError instanceof RequestError
-              ? caughtError.message
-              : "KeepFlip could not complete the eBay connection. Return to the app and try again.",
-          statusCode:
-            caughtError instanceof RequestError ? caughtError.statusCode : 500,
-          title: "eBay connection unavailable",
-        });
-      }
-
-      return jsonError(res, caughtError);
-    }
-  };
-}
-
-export {
-  connectionRowId,
-  encryptTokenPayload,
-  hashEbayUserId,
-  oauthStateRowId,
-};
-
-export default createHandler();
