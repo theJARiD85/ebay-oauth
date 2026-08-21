@@ -1,5 +1,5 @@
 import { Client, Databases, Users, Account } from "node-appwrite";
-import { createHash, randomBytes, createCipheriv, createHmac } from "node-crypto";
+import { createHash, randomBytes, createCipheriv, createHmac } from "crypto";
 
 // =========================================================================
 // 1. CONSTANTS
