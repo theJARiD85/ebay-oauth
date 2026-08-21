@@ -310,6 +310,26 @@ test("claims a state, fingerprints the eBay user, encrypts token data, and retur
   assert.equal(JSON.stringify(result).includes("authorization-code"), false);
   assert.equal(JSON.stringify(result).includes("access-token"), false);
   assert.equal(JSON.stringify(result).includes("refresh-token"), false);
+
+  const stateClaim = calls.find(
+    (call) =>
+      call.url.endsWith("/tablesdb/keepflip/tables/ebay_oauth_states/rows") &&
+      call.options.method === "PATCH",
+  );
+  assert.deepEqual(JSON.parse(stateClaim.options.body), {
+    data: {
+      claimedAt: "2026-08-17T12:00:00.000Z",
+      status: "processing",
+    },
+    queries: [
+      JSON.stringify({ method: "equal", column: "$id", values: [stateRowId] }),
+      JSON.stringify({
+        method: "equal",
+        column: "status",
+        values: ["pending"],
+      }),
+    ],
+  });
 });
 
 test("rejects an expired OAuth state before it contacts eBay", async () => {

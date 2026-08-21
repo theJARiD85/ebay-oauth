@@ -434,7 +434,7 @@ async function updateState({ data, fetchImpl, runtime, stateRowId }) {
 
 async function claimState({ fetchImpl, now, runtime, stateRowId }) {
   const queryFor = (column, value) =>
-    `equal(${JSON.stringify(column)},[${JSON.stringify(value)}])`;
+    JSON.stringify({ method: "equal", column, values: [value] });
   const payload = await requireAppwriteSuccess({
     apiKey: runtime.apiKey,
     body: {
