@@ -9,6 +9,7 @@
     "test": "node --test test/main.test.js"
   },
   "dependencies": {
-    "appwrite": "26.2.0"
+    "node-appwrite": "27.1.0",
+    "node-crypto": "1.0.0"
   }
 }
