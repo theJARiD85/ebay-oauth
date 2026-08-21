@@ -14,10 +14,6 @@ const STATUS_PATH = "/status";
 const CALLBACK_PATH = "/oauth/ebay/callback";
 const DECLINED_PATH = "/oauth/ebay/declined";
 const APP_RETURN_URL = "keepflip://ebay/connected";
-const EBAY_BASE_SCOPE = "https://api.ebay.com/oauth/api_scope";
-const EBAY_IDENTITY_SCOPE =
-  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly";
-
 const STATE_TTL_MS = 10 * 60 * 1000;
 const MAX_CODE_LENGTH = 1024;
 const MAX_STATE_LENGTH = 160;
@@ -78,6 +74,14 @@ function queryValue(req, key) {
     if (cleaned) return cleaned;
   }
 
+  if (typeof parsedQuery === "string") {
+    const value = cleanText(
+      new URLSearchParams(parsedQuery).get(key),
+      8_000,
+    );
+    if (value) return value;
+  }
+
   const queryString = cleanText(req?.queryString, 8_000);
   if (queryString) {
     return cleanText(new URLSearchParams(queryString).get(key), 8_000);
@@ -86,8 +90,21 @@ function queryValue(req, key) {
   const requestUrl = cleanText(req?.url, 8_000);
   if (requestUrl) {
     try {
-      return cleanText(
+      const value = cleanText(
         new URL(requestUrl, "https://keepflip.invalid").searchParams.get(key),
+        8_000,
+      );
+      if (value) return value;
+    } catch {
+      // Try the explicit request path below.
+    }
+  }
+
+  const requestPath = cleanText(req?.path, 8_000);
+  if (requestPath) {
+    try {
+      return cleanText(
+        new URL(requestPath, "https://keepflip.invalid").searchParams.get(key),
         8_000,
       );
     } catch {
@@ -133,34 +150,23 @@ function requestBody(req) {
   return {};
 }
 
-function requestedScopes() {
-  const supplied = cleanText(process.env.EBAY_OAUTH_SCOPES, 4_000);
-  const scopes = (supplied
-    ? supplied.split(/\s+/)
-    : [EBAY_BASE_SCOPE, EBAY_IDENTITY_SCOPE]
-  ).filter(Boolean);
-  const unique = [...new Set([EBAY_BASE_SCOPE, EBAY_IDENTITY_SCOPE, ...scopes])];
-
+function requestedScopeText(value) {
+  const supplied = cleanText(value, 4_000);
+  const scopes = supplied.split(/\s+/).filter(Boolean);
   if (
-    unique.length === 0 ||
-    unique.some(
+    scopes.length === 0 ||
+    scopes.some(
       (scope) =>
         !/^https:\/\/api\.ebay\.com\/oauth\/(?:api_scope(?:\/[A-Za-z0-9._-]+)*|scope\/[A-Za-z0-9._-]+)$/.test(scope),
     )
   ) {
     throw new RequestError(
-      "EBAY_OAUTH_SCOPES contains an invalid eBay OAuth scope.",
-      500,
+      "KeepFlip supplied an invalid eBay OAuth scope list.",
+      400,
     );
   }
 
-  return unique;
-}
-
-function ebayAuthorizeEndpoint(environment) {
-  return environment === "production"
-    ? "https://auth.ebay.com/oauth2/authorize"
-    : "https://auth.sandbox.ebay.com/oauth2/authorize";
+  return [...new Set(scopes)].join(" ");
 }
 
 function ebayTokenEndpoint(environment) {
@@ -386,16 +392,6 @@ async function authenticateCaller({ fetchImpl, req, runtime }) {
   return { ownerId: callerUserId };
 }
 
-function authorizationUrl({ clientId, environment, ruName, scopes, state }) {
-  const url = new URL(ebayAuthorizeEndpoint(environment));
-  url.searchParams.set("client_id", clientId);
-  url.searchParams.set("redirect_uri", ruName);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", scopes.join(" "));
-  url.searchParams.set("state", state);
-  return url.toString();
-}
-
 function appReturnUrl(status) {
   const url = new URL(APP_RETURN_URL);
   url.searchParams.set("status", status);
@@ -559,7 +555,9 @@ async function fetchEbayUserId({ accessToken, environment, fetchImpl }) {
 async function handleConnect({ fetchImpl, now, req, res }) {
   const runtime = appwriteRuntime(req);
   const { ownerId } = await authenticateCaller({ fetchImpl, req, runtime });
-  const environment = oauthEnvironment(requestBody(req).environment);
+  const body = requestBody(req);
+  const environment = oauthEnvironment(body.environment);
+  const scopeText = requestedScopeText(body.scopeText);
   decodeBase64Key(
     "EBAY_TOKEN_ENCRYPTION_KEY",
     requireEnvironment("EBAY_TOKEN_ENCRYPTION_KEY"),
@@ -568,9 +566,6 @@ async function handleConnect({ fetchImpl, now, req, res }) {
     "EBAY_USER_ID_HMAC_KEY",
     requireEnvironment("EBAY_USER_ID_HMAC_KEY"),
   );
-  const { clientId } = credentialsFor(environment);
-  const ruName = ruNameFor(environment);
-  const scopes = requestedScopes();
   const state = randomBytes(32).toString("base64url");
   const stateRowId = oauthStateRowId(state);
   const createdAt = now.toISOString();
@@ -584,7 +579,7 @@ async function handleConnect({ fetchImpl, now, req, res }) {
         environment,
         expiresAt,
         ownerId,
-        scopeText: scopes.join(" "),
+        scopeText,
         status: "pending",
       },
       permissions: [],
@@ -600,16 +595,10 @@ async function handleConnect({ fetchImpl, now, req, res }) {
   });
 
   return res.json({
-    authorizationUrl: authorizationUrl({
-      clientId,
-      environment,
-      ruName,
-      scopes,
-      state,
-    }),
     expiresAt,
     environment,
     ok: true,
+    state,
   });
 }
 
