@@ -118,6 +118,41 @@ test("creates a private state row and returns an eBay consent URL", async () => 
   assert.equal(JSON.stringify(payload.data).includes(state), false);
 });
 
+test("uses the environment requested by the signed-in app", async () => {
+  configureEnvironment();
+  const handler = createHandler({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/account")) {
+        return jsonResponse(200, { $id: OWNER_ID, status: true });
+      }
+      if (String(url).endsWith("/tablesdb/keepflip/tables/ebay_oauth_states/rows")) {
+        return jsonResponse(201, { $id: "production-state-row" });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    now: () => NOW,
+  });
+  const sink = responseSink();
+
+  await handler({
+    req: {
+      bodyJson: { environment: "production" },
+      headers: authenticatedHeaders(),
+      method: "POST",
+      path: "/connect",
+    },
+    res: sink.res,
+  });
+
+  const result = sink.response();
+  const authorizeUrl = new URL(result.body.authorizationUrl);
+  assert.equal(authorizeUrl.origin, "https://auth.ebay.com");
+  assert.equal(
+    authorizeUrl.searchParams.get("redirect_uri"),
+    "KeepFlip-TheJa-PRD-123",
+  );
+});
+
 test("claims a state, fingerprints the eBay user, encrypts token data, and returns no eBay secret to the app", async () => {
   configureEnvironment();
   const state = randomBytes(32).toString("base64url");

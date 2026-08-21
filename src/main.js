@@ -106,14 +106,31 @@ function requireEnvironment(name) {
   return value;
 }
 
-function oauthEnvironment() {
-  const value = cleanText(process.env.EBAY_OAUTH_ENVIRONMENT, 32).toLowerCase();
+function oauthEnvironment(requestedValue) {
+  const value = cleanText(
+    requestedValue || process.env.EBAY_OAUTH_ENVIRONMENT,
+    32,
+  ).toLowerCase();
   if (value === "sandbox" || value === "production") return value;
 
   throw new RequestError(
     "KeepFlip's eBay connection must set EBAY_OAUTH_ENVIRONMENT to sandbox or production.",
     500,
   );
+}
+
+function requestBody(req) {
+  const body = req?.bodyJson ?? req?.body;
+  if (body && typeof body === "object") return body;
+  if (typeof body === "string") {
+    try {
+      const parsed = JSON.parse(body);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
 }
 
 function requestedScopes() {
@@ -549,7 +566,7 @@ async function fetchEbayUserId({ accessToken, environment, fetchImpl }) {
 async function handleConnect({ fetchImpl, now, req, res }) {
   const runtime = appwriteRuntime(req);
   const { ownerId } = await authenticateCaller({ fetchImpl, req, runtime });
-  const environment = oauthEnvironment();
+  const environment = oauthEnvironment(requestBody(req).environment);
   const { clientId } = credentialsFor(environment);
   const ruName = ruNameFor(environment);
   const scopes = requestedScopes();
@@ -597,7 +614,7 @@ async function handleConnect({ fetchImpl, now, req, res }) {
 async function handleStatus({ fetchImpl, req, res }) {
   const runtime = appwriteRuntime(req);
   const { ownerId } = await authenticateCaller({ fetchImpl, req, runtime });
-  const environment = oauthEnvironment();
+  const environment = oauthEnvironment(requestBody(req).environment);
   const rowId = connectionRowId(ownerId, environment);
   const result = await appwriteRequest({
     apiKey: runtime.apiKey,
@@ -637,7 +654,6 @@ async function handleStatus({ fetchImpl, req, res }) {
 
 async function handleCallback({ fetchImpl, now, req, res }) {
   const runtime = appwriteRuntime(req);
-  const environment = oauthEnvironment();
   const state = queryValue(req, "state");
 
   if (!isOpaqueState(state)) {
@@ -662,9 +678,13 @@ async function handleCallback({ fetchImpl, now, req, res }) {
   });
 
   const stateRow = stateResult.ok ? stateResult.payload : null;
+  const environment =
+    stateRow?.environment === "production" || stateRow?.environment === "sandbox"
+      ? stateRow.environment
+      : null;
   if (
     !stateRow ||
-    stateRow.environment !== environment ||
+    !environment ||
     stateRow.status !== "pending" ||
     !isFutureIsoDate(stateRow.expiresAt, now)
   ) {
@@ -869,7 +889,10 @@ export function createHandler({ fetchImpl = fetch, now = () => new Date() } = {}
 
       if (path === CALLBACK_PATH || path === DECLINED_PATH) {
         return browserPage(res, {
-          message: "KeepFlip could not complete the eBay connection. Return to the app and try again.",
+          message:
+            caughtError instanceof RequestError
+              ? caughtError.message
+              : "KeepFlip could not complete the eBay connection. Return to the app and try again.",
           statusCode:
             caughtError instanceof RequestError ? caughtError.statusCode : 500,
           title: "eBay connection unavailable",
