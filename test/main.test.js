@@ -44,7 +44,7 @@ function responseSink() {
 function configureEnvironment() {
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "keepflip";
-  process.env.EBAY_OAUTH_ENVIRONMENT = "sandbox";
+  delete process.env.EBAY_OAUTH_ENVIRONMENT;
   process.env.EBAY_SANDBOX_CLIENT_ID = "client-id";
   process.env.EBAY_SANDBOX_CLIENT_SECRET = "client-secret";
   process.env.EBAY_PRODUCTION_CLIENT_ID = "production-client-id";
@@ -64,7 +64,7 @@ function authenticatedHeaders() {
   };
 }
 
-test("creates a private state row and returns an eBay consent URL", async () => {
+test("creates a private state row without generating the eBay consent URL", async () => {
   configureEnvironment();
   const calls = [];
   const handler = createHandler({
@@ -84,6 +84,11 @@ test("creates a private state row and returns an eBay consent URL", async () => 
 
   await handler({
     req: {
+      bodyJson: {
+        environment: "sandbox",
+        scopeText:
+          "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+      },
       headers: authenticatedHeaders(),
       method: "POST",
       path: "/connect",
@@ -95,17 +100,10 @@ test("creates a private state row and returns an eBay consent URL", async () => 
   assert.equal(result.kind, "json");
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.ok, true);
+  assert.equal(result.body.environment, "sandbox");
+  assert.equal(result.body.authorizationUrl, undefined);
 
-  const authorizeUrl = new URL(result.body.authorizationUrl);
-  assert.equal(authorizeUrl.origin, "https://auth.sandbox.ebay.com");
-  assert.equal(authorizeUrl.pathname, "/oauth2/authorize");
-  assert.equal(authorizeUrl.searchParams.get("client_id"), "client-id");
-  assert.equal(
-    authorizeUrl.searchParams.get("redirect_uri"),
-    "KeepFlip-TheJa-SBX-123",
-  );
-
-  const state = authorizeUrl.searchParams.get("state");
+  const state = result.body.state;
   assert.match(state, /^[A-Za-z0-9_-]{32,160}$/);
 
   const stateWrite = calls.find((call) =>
@@ -114,6 +112,10 @@ test("creates a private state row and returns an eBay consent URL", async () => 
   const payload = JSON.parse(stateWrite.options.body);
   assert.equal(payload.rowId, oauthStateRowId(state));
   assert.equal(payload.data.ownerId, OWNER_ID);
+  assert.equal(
+    payload.data.scopeText,
+    "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+  );
   assert.equal(payload.data.status, "pending");
   assert.equal(JSON.stringify(payload.data).includes(state), false);
 });
@@ -136,7 +138,10 @@ test("uses the environment requested by the signed-in app", async () => {
 
   await handler({
     req: {
-      bodyJson: { environment: "production" },
+      bodyJson: {
+        environment: "production",
+        scopeText: "https://api.ebay.com/oauth/api_scope",
+      },
       headers: authenticatedHeaders(),
       method: "POST",
       path: "/connect",
@@ -145,12 +150,75 @@ test("uses the environment requested by the signed-in app", async () => {
   });
 
   const result = sink.response();
-  const authorizeUrl = new URL(result.body.authorizationUrl);
-  assert.equal(authorizeUrl.origin, "https://auth.ebay.com");
+  assert.equal(result.body.environment, "production");
+  assert.match(result.body.state, /^[A-Za-z0-9_-]{32,160}$/);
+  assert.equal(result.body.authorizationUrl, undefined);
+});
+
+test("requires the signed-in app to choose the eBay environment", async () => {
+  configureEnvironment();
+  const handler = createHandler({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/account")) {
+        return jsonResponse(200, { $id: OWNER_ID, status: true });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    now: () => NOW,
+  });
+  const sink = responseSink();
+
+  await handler({
+    req: {
+      headers: authenticatedHeaders(),
+      method: "POST",
+      path: "/connect",
+    },
+    res: sink.res,
+  });
+
+  assert.equal(sink.response().statusCode, 400);
   assert.equal(
-    authorizeUrl.searchParams.get("redirect_uri"),
-    "KeepFlip-TheJa-PRD-123",
+    sink.response().body.error,
+    "KeepFlip must request either the sandbox or production eBay environment.",
   );
+});
+
+test("rejects invalid KeepFlip encryption keys before sending the user to eBay", async () => {
+  configureEnvironment();
+  process.env.EBAY_TOKEN_ENCRYPTION_KEY = Buffer.alloc(36, 7).toString("base64");
+  let stateWasWritten = false;
+  const handler = createHandler({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/account")) {
+        return jsonResponse(200, { $id: OWNER_ID, status: true });
+      }
+      stateWasWritten = true;
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    now: () => NOW,
+  });
+  const sink = responseSink();
+
+  await handler({
+    req: {
+      bodyJson: {
+        environment: "sandbox",
+        scopeText: "https://api.ebay.com/oauth/api_scope",
+      },
+      headers: authenticatedHeaders(),
+      method: "POST",
+      path: "/connect",
+    },
+    res: sink.res,
+  });
+
+  assert.equal(sink.response().statusCode, 500);
+  assert.equal(
+    sink.response().body.error,
+    "EBAY_TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes.",
+  );
+  assert.equal(stateWasWritten, false);
 });
 
 test("claims a state, fingerprints the eBay user, encrypts token data, and returns no eBay secret to the app", async () => {
@@ -211,8 +279,9 @@ test("claims a state, fingerprints the eBay user, encrypts token data, and retur
     req: {
       headers: { "x-appwrite-key": "dynamic-function-key" },
       method: "GET",
-      path: "/oauth/ebay/callback",
-      query: { code: "one-time-authorization-code", state },
+      path:
+        `/oauth/ebay/callback?state=${encodeURIComponent(state)}` +
+        `&code=${encodeURIComponent("one-time-authorization-code")}`,
     },
     res: sink.res,
   });
@@ -301,6 +370,7 @@ test("does not expose encrypted token material through authenticated status", as
 
   await handler({
     req: {
+      bodyJson: { environment: "sandbox" },
       headers: authenticatedHeaders(),
       method: "POST",
       path: "/status",
