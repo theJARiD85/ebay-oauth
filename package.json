@@ -7,5 +7,8 @@
   "scripts": {
     "check": "node --check src/main.js",
     "test": "node --test test/main.test.js"
+  },
+  "dependencies": {
+    "appwrite": "26.2.0"
   }
 }
